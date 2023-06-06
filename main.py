@@ -12,17 +12,25 @@ from dotenv import load_dotenv
 import re
 from datetime import datetime, timedelta
 import string
+import boto3
+
+dynamodb = boto3.resource("dynamodb")
+table = dynamodb.Table("leaderboard_activities")
+
 
 load_dotenv()
 
 options = Options()
-options.add_experimental_option("detach", True)
+options.add_argument("--headless")
+options.add_argument("--lang=pl-PL")
+options.add_argument("log-level=2")
+# options.add_experimental_option("detach", True)
 
 driver = webdriver.Chrome(
     service=Service(ChromeDriverManager().install()), options=options
 )
 
-driver.implicitly_wait(20)
+driver.implicitly_wait(10)
 
 
 def login():
@@ -57,19 +65,25 @@ def list_club_members():
 
     members = set()
 
-    page = "https://www.strava.com/clubs/919103/members"
-    driver.get(page)
+    clubs = [
+        "https://www.strava.com/clubs/919103/members",
+        "https://www.strava.com/clubs/1144460/members",
+        "https://www.strava.com/clubs/1144477/members",
+    ]
 
-    try:
-        pagination_nav = driver.find_element(By.CLASS_NAME, "pagination")
-    except NoSuchElementException:
-        pagination_nav = None
+    for club in clubs:
+        driver.get(club)
 
-    page_nums = re.findall(r"\d+", pagination_nav.text) if pagination_nav else ["1"]
+        try:
+            pagination_nav = driver.find_element(By.CLASS_NAME, "pagination")
+        except NoSuchElementException:
+            pagination_nav = None
 
-    for page_num in page_nums:
-        driver.get(page + f"?page={page_num}")
-        members.update(get_members())
+        page_nums = re.findall(r"\d+", pagination_nav.text) if pagination_nav else ["1"]
+
+        for page_num in page_nums:
+            driver.get(club + f"?page={page_num}")
+            members.update(get_members())
 
     return members
 
@@ -191,11 +205,21 @@ def list_athletes_activities(athletes):
 
         return athlete_activities
 
-    for athlete in athletes:
+    for athlete_num, athlete in enumerate(athletes):
         activities = get_activities(athlete)
 
-        for activity in activities:
-            build_record(athlete, activity)
+        for activity_num, activity in enumerate(activities):
+            print(athlete_num, activity_num, len(athletes), len(activities))
+
+            record = build_record(athlete, activity)
+            upload_activity(record)
+
+
+def upload_activity(record):
+    try:
+        table.put_item(Item=record)
+    except Exception as e:
+        print(e)
 
 
 def build_record(athlete, activity):
@@ -206,11 +230,11 @@ def build_record(athlete, activity):
         if "Yesterday" in text:
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             yesterday = today - timedelta(days=1)
-            text = text.replace("Yesterday", yesterday.strftime("%d %B %Y"))
+            text = text.replace("Yesterday", yesterday.strftime("%B %d, %Y"))
         elif "Today" in text:
-            text = text.replace("Today", datetime.now().strftime("%d %B %Y"))
+            text = text.replace("Today", datetime.now().strftime("%B %d, %Y"))
 
-        datetime_obj = datetime.strptime(text, "%d %B %Y at %H:%M")
+        datetime_obj = datetime.strptime(text, "%B %d, %Y at %I:%M %p")
         timestamp = datetime_obj.timestamp()
 
         return int(timestamp)
@@ -244,15 +268,21 @@ def build_record(athlete, activity):
     def cal_value(text):
         return int(re.sub(r"[^\d]", "", text))
 
+    def avg_temp_value(text):
+        return re.search(r"-?\d+", text).group()
+
+    def avg_hr_value(text):
+        return int(re.sub(r"[^\d]", "", text))
+
     record_base = {
-        "id": int(activity[0]),
-        "timestamp": datetime_value(activity[1]),
-        "type": normalize_str(activity[2]),
-        "url": activity[4],
-        "title": activity[3],
-        "athlete_id": athlete[1],
-        "athlete_name": athlete[0],
-        "athlete_url": athlete[2],
+        "id": str(activity[0]),
+        "timestamp": str(datetime_value(activity[1])),
+        "type": str(normalize_str(activity[2])),
+        "url": str(activity[4]),
+        "title": str(activity[3]),
+        "athlete_id": str(athlete[1]),
+        "athlete_name": str(athlete[0]),
+        "athlete_url": str(athlete[2]),
     }
 
     # add unsupperored strings like title: Cal, value: 275 Cal
@@ -264,13 +294,15 @@ def build_record(athlete, activity):
         "steps": steps_value,
         "cal": cal_value,
         "speed": speed_value,
+        "avg temp": avg_temp_value,
+        "avg hr": avg_hr_value,
     }
 
     try:
         normalized_stats = [
             (
                 normalize_str(stat[0]),
-                type_value_to_regex[normalize_str(stat[0])](stat[1]),
+                str(type_value_to_regex[normalize_str(stat[0])](stat[1])),
             )
             for stat in activity[5]
         ]
@@ -279,7 +311,7 @@ def build_record(athlete, activity):
 
     record_base.update(dict(normalized_stats))
 
-    ...
+    return record_base
 
 
 login()
